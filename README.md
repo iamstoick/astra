@@ -20,6 +20,21 @@ python3 -m http.server 8080
 # open http://127.0.0.1:8080
 ```
 
+## Run with Docker (default port 5555)
+
+```bash
+cd astra
+docker build -t astra .
+docker run --rm -p 5555:5555 astra
+# open http://127.0.0.1:5555 in your browser
+```
+
+The container listens on 5555 by default. To use another container-side port:
+
+```bash
+docker run --rm -p 8080:8080 -e ASTRA_PORT=8080 astra
+```
+
 Enter the Argus base URL (e.g. `http://127.0.0.1:3000`) and its bearer token.
 The connection is remembered in `localStorage`; stats auto-refresh every 15s.
 

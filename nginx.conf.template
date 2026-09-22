@@ -1,0 +1,10 @@
+# Rendered by the nginx image entrypoint via envsubst into conf.d/default.conf.
+# NOTE: keep this file free of nginx dollar-variables: envsubst would expand
+# them, and it does not understand shell :- defaults either (the Dockerfile
+# ENV provides the default). Plain root/index serving needs none.
+server {
+    listen ${ASTRA_PORT} default_server;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+}
