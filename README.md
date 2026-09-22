@@ -1,12 +1,15 @@
 # Astra — Argus Dashboard
 
 Astra is a standalone web dashboard for [Argus](git@github.com:iamstoick/argus.git),
-the codebase dictionary & evolution MCP server. Point it at any Argus server in
-`serve` mode and it shows:
+the codebase dictionary & evolution MCP server. Connect it to one or more Argus
+servers in `serve` mode and it shows:
 
-- How many projects are connected
+- Fleet totals: servers up, projects connected, files/symbols indexed
 - Per-project statistics: files, symbols, relationships, watcher mode, last-sync
   detail (scanned / updated / removed / unchanged / failed)
+- Index freshness per project ("synced 5m ago", with a stale badge past 24h)
+- Composition: file counts by language, symbol counts by kind
+- Server health: Argus version, uptime, tree-sitter grammar status
 
 No build step, no dependencies — three static files.
 
@@ -35,20 +38,21 @@ The container listens on 5555 by default. To use another container-side port:
 docker run --rm -p 8080:8080 -e ASTRA_PORT=8080 astra
 ```
 
-Enter the Argus base URL (e.g. `http://127.0.0.1:3000`) and its bearer token.
-The connection is remembered in `localStorage`; stats auto-refresh every 15s.
+Add each Argus server's base URL (e.g. `http://127.0.0.1:3000`) and its bearer
+token, then press Connect all. Connections are remembered in `localStorage`;
+stats auto-refresh every 15s. Each server section links to that server's own
+Argus admin page for symbol search and drill-down.
 
 ## Argus requirements
 
 - Argus running in `serve` mode with HTTP enabled (this is the default for
   `argus serve`), reachable from your browser
 - A bearer token if the server sets one (`ARGUS_TOKEN` / `--token`)
-- An Argus build that answers CORS preflights (a small pending change in the
-  argus working tree — push it and redeploy before connecting Astra)
+- An Argus build that answers CORS preflights
 
 ## Notes
 
-- One Argus server per dashboard view. To watch several servers, open one tab
-  per server (each tab keeps its own connection).
-- The token is stored only in your browser's `localStorage`, never sent
-  anywhere except the configured Argus server.
+- Freshness, composition, and health rows need a recent Argus; against older
+  servers Astra degrades gracefully (those rows show "–"/"unknown" instead).
+- Tokens are stored only in your browser's `localStorage`, never sent
+  anywhere except the configured Argus servers.

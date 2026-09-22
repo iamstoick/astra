@@ -1,17 +1,41 @@
 "use strict";
-/* Astra: dashboard for one Argus server. No dependencies, no build step. */
+/* Astra: fleet dashboard for Argus servers. No dependencies, no build step.
+ * Tolerates older Argus servers: every field added after v0.1 is optional. */
 const $ = (id) => document.getElementById(id);
 const REFRESH_MS = 15000;
+const STALE_MS = 24 * 3600 * 1000;
+const STORE_KEY = "astraConnections";
 let timer = null;
 
+function newId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
+  return "c" + Date.now().toString(36) + Math.floor(Math.random() * 1e9).toString(36);
+}
+
+function loadConnections() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (raw) {
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) return list.filter((c) => c && typeof c.baseUrl === "string");
+    }
+  } catch (e) { /* fall through to legacy */ }
+  // Migrate the original single-connection keys.
+  const url = localStorage.getItem("astraUrl") || "";
+  const token = localStorage.getItem("astraToken") || "";
+  localStorage.removeItem("astraUrl");
+  localStorage.removeItem("astraToken");
+  return [{ id: newId(), baseUrl: url, token }];
+}
+
 const state = {
-  baseUrl: localStorage.getItem("astraUrl") || "",
-  token: localStorage.getItem("astraToken") || "",
-  projects: [],
+  connections: loadConnections(),
+  results: {}, // id -> { ok, projects, health, error }
 };
 
-$("url").value = state.baseUrl;
-$("token").value = state.token;
+function persist() {
+  localStorage.setItem(STORE_KEY, JSON.stringify(state.connections));
+}
 
 function setStatus(text, cls) {
   const el = $("status");
@@ -25,54 +49,200 @@ function esc(s) {
   }[c]));
 }
 
-function normalizedBase() {
-  return state.baseUrl.replace(/\/+$/, "");
+function normalizedBase(conn) {
+  return conn.baseUrl.replace(/\/+$/, "");
 }
 
-async function fetchProjects() {
+/** Parse Argus UTC "YYYY-MM-DD HH:MM:SS" or ISO strings; null when unparseable. */
+function parseTime(raw) {
+  if (typeof raw !== "string" || raw === "") return null;
+  const iso = raw.indexOf("T") >= 0 ? raw : raw.replace(" ", "T") + "Z";
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function relativeTime(ms) {
+  if (ms == null) return "never";
+  const diff = Date.now() - ms;
+  if (diff < 0) return "just now";
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "just now";
+  if (min < 60) return min + "m ago";
+  const h = Math.floor(min / 60);
+  if (h < 24) return h + "h ago";
+  const d = Math.floor(h / 24);
+  if (d < 30) return d + "d ago";
+  return new Date(ms).toLocaleDateString();
+}
+
+function isStale(ms) {
+  return ms != null && Date.now() - ms > STALE_MS;
+}
+
+async function fetchJson(conn, path) {
   const headers = {};
-  if (state.token) headers["Authorization"] = "Bearer " + state.token;
+  if (conn.token) headers["Authorization"] = "Bearer " + conn.token;
   let res;
   try {
-    res = await fetch(normalizedBase() + "/api/projects", { headers });
+    res = await fetch(normalizedBase(conn) + path, { headers });
   } catch (e) {
     throw new Error("unreachable (" + (e instanceof Error ? e.message : e) + ")");
   }
+  if (res.status === 404) return { notFound: true };
   const body = await res.json().catch(() => ({}));
   if (res.status === 401) throw new Error("rejected: missing or invalid token");
   if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
-  if (!Array.isArray(body.projects)) throw new Error("unexpected response shape");
-  return body.projects;
+  return { data: body };
+}
+
+async function pollConnection(conn) {
+  if (!conn.baseUrl) return { ok: false, error: "no URL configured" };
+  try {
+    const projectsRes = await fetchJson(conn, "/api/projects");
+    if (projectsRes.notFound || !projectsRes.data || !Array.isArray(projectsRes.data.projects)) {
+      return { ok: false, error: "unexpected response (is this an Argus server?)" };
+    }
+    let health = null;
+    try {
+      const healthRes = await fetchJson(conn, "/api/health");
+      if (!healthRes.notFound && healthRes.data) health = healthRes.data;
+    } catch (e) { /* health is best-effort on old servers */ }
+    return { ok: true, projects: projectsRes.data.projects, health };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+function renderServers() {
+  const wrap = $("servers");
+  wrap.innerHTML = "";
+  for (const conn of state.connections) {
+    const row = document.createElement("div");
+    row.className = "conn";
+    const result = state.results[conn.id];
+    const dot = !result ? "" : result.ok
+      ? '<span class="dot ok" title="connected"></span>'
+      : '<span class="dot bad" title="' + esc(result.error || "error") + '"></span>';
+    row.innerHTML =
+      dot +
+      '<input type="text" class="url" size="32" placeholder="http://127.0.0.1:3000" autocomplete="off" spellcheck="false" value="' + esc(conn.baseUrl) + '">' +
+      '<input type="password" class="tok" size="16" placeholder="bearer token" autocomplete="off" value="' + esc(conn.token) + '">' +
+      '<button class="rm">Remove</button>';
+    row.querySelector(".url").addEventListener("input", (e) => { conn.baseUrl = e.target.value.trim(); persist(); });
+    row.querySelector(".tok").addEventListener("input", (e) => { conn.token = e.target.value.trim(); persist(); });
+    row.querySelector(".rm").addEventListener("click", () => {
+      state.connections = state.connections.filter((c) => c.id !== conn.id);
+      delete state.results[conn.id];
+      if (state.connections.length === 0) state.connections.push({ id: newId(), baseUrl: "", token: "" });
+      persist();
+      renderServers();
+      render();
+    });
+    wrap.appendChild(row);
+  }
+}
+
+function compLine(obj) {
+  if (!obj || typeof obj !== "object") return null;
+  const entries = Object.entries(obj).filter(([, v]) => typeof v === "number");
+  if (entries.length === 0) return null;
+  entries.sort((a, b) => b[1] - a[1]);
+  return entries.map(([k, v]) => esc(k) + " " + v).join(" · ");
+}
+
+function grammarBadge(health) {
+  if (!health || !health.grammars) return "";
+  const g = health.grammars;
+  const loaded = Array.isArray(g.loaded) ? g.loaded.length : 0;
+  const missing = g.unavailable && typeof g.unavailable === "object" ? Object.keys(g.unavailable) : [];
+  if (missing.length === 0) return '<span class="badge ok">' + loaded + "/8 grammars</span>";
+  return '<span class="badge warn" title="' + esc(missing.join(", ")) + '">' + loaded + "/8 grammars · " + missing.length + " missing</span>";
+}
+
+function freshness(p) {
+  const ms = parseTime(p.lastSyncAt);
+  if (ms == null && p.lastSyncAt != null) return ""; // unknown format: say nothing
+  if (ms == null) return '<div class="fresh">synced: never</div>';
+  const stale = isStale(ms);
+  return '<div class="fresh">synced: ' + esc(relativeTime(ms)) +
+    (stale ? ' <span class="badge warn">stale</span>' : "") + "</div>";
 }
 
 function render() {
-  const projects = state.projects;
-  $("projectCount").textContent = String(projects.length);
-  $("totalSymbols").textContent = String(projects.reduce((n, p) => n + (p.symbols || 0), 0));
-  $("totalFiles").textContent = String(projects.reduce((n, p) => n + (p.files || 0), 0));
-  $("serverLabel").textContent = normalizedBase();
+  const results = state.connections.map((c) => ({ conn: c, res: state.results[c.id] }));
+  const up = results.filter((r) => r.res && r.res.ok);
+  const projects = up.flatMap((r) => r.res.projects.map((p) => ({ server: r.conn, project: p })));
 
-  const wrap = $("projects");
-  wrap.innerHTML = "";
-  for (const p of projects) {
-    const sync = p.lastSync || {};
-    const failed = Array.isArray(sync.failed) ? sync.failed : [];
-    const card = document.createElement("div");
-    card.className = "card";
-    card.innerHTML =
-      "<h2>" + esc(p.name) + '<span class="mode">' + esc(p.watching ? "watching" : "static") + "</span></h2>" +
-      '<p class="root">' + esc(p.root || "") + "</p>" +
-      '<div class="nums">' +
-      num(p.files, "files") + num(p.symbols, "symbols") + num(p.relationships, "relationships") +
-      '<div class="n"><div class="v' + (failed.length > 0 ? " bad" : "") + '">' + failed.length + '</div><div class="k">failed</div></div>' +
-      "</div>" +
-      '<p class="sync">last sync: ' + esc(describeSync(sync)) + "</p>" +
-      (failed.length > 0
-        ? '<ul class="failed-list">' + failed.slice(0, 10).map((f) => "<li>" + esc(f) + "</li>").join("") +
-          (failed.length > 10 ? "<li>…+" + (failed.length - 10) + " more</li>" : "") + "</ul>"
-        : "");
-    wrap.appendChild(card);
+  $("serverCount").textContent = up.length + "/" + state.connections.filter((c) => c.baseUrl).length;
+  $("projectCount").textContent = String(projects.length);
+  $("totalSymbols").textContent = String(projects.reduce((n, p) => n + (p.project.symbols || 0), 0));
+  $("totalFiles").textContent = String(projects.reduce((n, p) => n + (p.project.files || 0), 0));
+
+  const fleet = $("fleet");
+  fleet.innerHTML = "";
+  for (const { conn, res } of results) {
+    if (!conn.baseUrl) continue;
+    const section = document.createElement("div");
+    section.className = "server";
+    const base = normalizedBase(conn);
+    if (!res) {
+      section.innerHTML = '<h2 class="srv">' + esc(base) + ' <span class="badge">not polled</span></h2>';
+    } else if (!res.ok) {
+      section.innerHTML = '<h2 class="srv">' + esc(base) + ' <span class="badge bad">down</span></h2>' +
+        '<p class="srverr">' + esc(res.error || "error") + "</p>";
+    } else {
+      const h = res.health || {};
+      const uptime = h.startedAt && parseTime(h.startedAt) != null
+        ? " · up " + esc(relativeTime(parseTime(h.startedAt))) : "";
+      section.innerHTML =
+        '<h2 class="srv">' + esc(base) + " " + grammarBadge(res.health) +
+        ' <span class="srvmeta">' + esc(h.version ? "v" + h.version : "") + esc(uptime) + "</span>" +
+        ' <a class="adminlink" href="' + esc(base) + '/" target="_blank" rel="noopener">Open Argus admin</a></h2>' +
+        '<div class="cards"></div>';
+      const cards = section.querySelector(".cards");
+      for (const p of res.projects) {
+        cards.appendChild(projectCard(p));
+      }
+      if (res.projects.length === 0) {
+        const empty = document.createElement("p");
+        empty.className = "srverr";
+        empty.textContent = "No projects configured on this server.";
+        section.appendChild(empty);
+      }
+    }
+    fleet.appendChild(section);
   }
+  const failed = results.filter((r) => r.conn.baseUrl && r.res && !r.res.ok);
+  if (failed.length > 0) {
+    setStatus("Connected to " + up.length + " server(s); " + failed.length + " failing.", "err");
+  } else if (up.length > 0) {
+    setStatus("All " + up.length + " server(s) responding. Updated just now.", "ok");
+  }
+}
+
+function projectCard(p) {
+  const sync = p.lastSync || {};
+  const failed = Array.isArray(sync.failed) ? sync.failed : [];
+  const card = document.createElement("div");
+  card.className = "card";
+  const langs = compLine(p.byExtension);
+  const kinds = compLine(p.byKind);
+  card.innerHTML =
+    "<h3>" + esc(p.name) + '<span class="mode">' + esc(p.watching ? "watching" : "static") + "</span></h3>" +
+    '<p class="root">' + esc(p.root || "") + "</p>" +
+    '<div class="nums">' +
+    num(p.files, "files") + num(p.symbols, "symbols") + num(p.relationships, "relationships") +
+    '<div class="n"><div class="v' + (failed.length > 0 ? " bad" : "") + '">' + failed.length + '</div><div class="k">failed</div></div>' +
+    "</div>" +
+    freshness(p) +
+    (langs ? '<div class="comp">languages: ' + langs + "</div>" : "") +
+    (kinds ? '<div class="comp">symbols: ' + kinds + "</div>" : "") +
+    '<p class="sync">last sync: ' + esc(describeSync(sync)) + "</p>" +
+    (failed.length > 0
+      ? '<ul class="failed-list">' + failed.slice(0, 10).map((f) => "<li>" + esc(f) + "</li>").join("") +
+        (failed.length > 10 ? "<li>…+" + (failed.length - 10) + " more</li>" : "") + "</ul>"
+      : "");
+  return card;
 }
 
 function num(v, k) {
@@ -87,41 +257,36 @@ function describeSync(sync) {
   );
 }
 
-async function refresh() {
-  try {
-    state.projects = await fetchProjects();
-    render();
-    const n = state.projects.length;
-    setStatus("Connected: " + n + (n === 1 ? " project." : " projects.") + " Updated just now.", "ok");
-  } catch (e) {
-    setStatus("Error: " + (e instanceof Error ? e.message : e), "err");
+async function refreshAll(silent) {
+  const active = state.connections.filter((c) => c.baseUrl);
+  if (active.length === 0) {
+    setStatus("Add an Argus server URL first.");
+    return;
   }
+  if (!silent) setStatus("Polling " + active.length + " server(s)…");
+  const settled = await Promise.all(active.map((c) => pollConnection(c)));
+  active.forEach((c, i) => { state.results[c.id] = settled[i]; });
+  $("dashboard").classList.remove("hidden");
+  renderServers();
+  render();
 }
 
 function restartAuto() {
   if (timer) clearInterval(timer);
   timer = null;
-  if ($("auto").checked) timer = setInterval(refresh, REFRESH_MS);
-}
-
-async function connect() {
-  state.baseUrl = $("url").value.trim();
-  state.token = $("token").value.trim();
-  localStorage.setItem("astraUrl", state.baseUrl);
-  localStorage.setItem("astraToken", state.token);
-  if (!state.baseUrl) {
-    setStatus("Enter an Argus server URL first.", "err");
-    return;
+  if ($("auto").checked && state.connections.some((c) => c.baseUrl)) {
+    timer = setInterval(() => refreshAll(true), REFRESH_MS);
   }
-  $("dashboard").classList.remove("hidden");
-  setStatus("Connecting…");
-  await refresh();
-  restartAuto();
 }
 
-$("connect").addEventListener("click", connect);
-$("refresh").addEventListener("click", refresh);
+$("addServer").addEventListener("click", () => {
+  state.connections.push({ id: newId(), baseUrl: "", token: "" });
+  persist();
+  renderServers();
+});
+$("connectAll").addEventListener("click", () => { refreshAll(false).then(restartAuto); });
+$("refreshAll").addEventListener("click", () => refreshAll(false));
 $("auto").addEventListener("change", restartAuto);
-$("url").addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
-$("token").addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
-if (state.baseUrl) connect();
+
+renderServers();
+if (state.connections.some((c) => c.baseUrl)) refreshAll(false).then(restartAuto);
