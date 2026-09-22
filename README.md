@@ -10,6 +10,7 @@ servers in `serve` mode and it shows:
 - Index freshness per project ("synced 5m ago", with a stale badge past 24h)
 - Composition: file counts by language, symbol counts by kind
 - Server health: Argus version, uptime, tree-sitter grammar status
+- Code health per project: expandable duplicate-group and dead-code reports
 
 No build step, no dependencies — three static files.
 

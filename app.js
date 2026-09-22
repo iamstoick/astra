@@ -200,8 +200,9 @@ function render() {
         ' <a class="adminlink" href="' + esc(base) + '/" target="_blank" rel="noopener">Open Argus admin</a></h2>' +
         '<div class="cards"></div>';
       const cards = section.querySelector(".cards");
+      const ctx = { base, token: conn.token };
       for (const p of res.projects) {
-        cards.appendChild(projectCard(p));
+        cards.appendChild(projectCard(p, ctx));
       }
       if (res.projects.length === 0) {
         const empty = document.createElement("p");
@@ -220,7 +221,7 @@ function render() {
   }
 }
 
-function projectCard(p) {
+function projectCard(p, ctx) {
   const sync = p.lastSync || {};
   const failed = Array.isArray(sync.failed) ? sync.failed : [];
   const card = document.createElement("div");
@@ -242,7 +243,104 @@ function projectCard(p) {
       ? '<ul class="failed-list">' + failed.slice(0, 10).map((f) => "<li>" + esc(f) + "</li>").join("") +
         (failed.length > 10 ? "<li>…+" + (failed.length - 10) + " more</li>" : "") + "</ul>"
       : "");
+  card.appendChild(healthSection("duplicates", "Duplicates", ctx, p.name));
+  card.appendChild(healthSection("dead-code", "Dead code", ctx, p.name));
   return card;
+}
+
+function healthSection(kind, label, ctx, project) {
+  const el = document.createElement("details");
+  el.className = "health";
+  const summary = document.createElement("summary");
+  summary.textContent = label;
+  const body = document.createElement("p");
+  body.className = "sync";
+  body.textContent = "Loading…";
+  el.appendChild(summary);
+  el.appendChild(body);
+  let loaded = false;
+  el.addEventListener("toggle", () => {
+    if (!el.open || loaded) return;
+    loaded = true;
+    loadHealthSection(el, summary, body, kind, label, ctx, project);
+  });
+  return el;
+}
+
+async function loadHealthSection(el, summary, body, kind, label, ctx, project) {
+  try {
+    const headers = {};
+    if (ctx.token) headers["Authorization"] = "Bearer " + ctx.token;
+    const res = await fetch(
+      ctx.base + "/api/projects/" + encodeURIComponent(project) + "/" + kind + "?limit=50",
+      { headers },
+    );
+    if (res.status === 404) {
+      summary.textContent = label + " (requires newer Argus)";
+      body.textContent = "This server does not provide this analysis.";
+      return;
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+    if (kind === "duplicates") renderDuplicates(el, summary, body, label, data);
+    else renderDead(el, summary, body, label, data);
+  } catch (e) {
+    body.textContent = "Failed to load: " + (e instanceof Error ? e.message : e);
+  }
+}
+
+function renderDuplicates(el, summary, body, label, data) {
+  const groups = Array.isArray(data.groups) ? data.groups : [];
+  summary.textContent = label + " (" + groups.length + (data.truncated ? "+" : "") + ")";
+  if (groups.length === 0) {
+    body.textContent = "No likely duplicates found.";
+    return;
+  }
+  body.remove();
+  const list = document.createElement("div");
+  for (const g of groups) {
+    const members = Array.isArray(g.symbols) ? g.symbols : [];
+    const div = document.createElement("div");
+    div.className = "dupgroup";
+    div.innerHTML = "<strong>" + esc(g.key || "?") + "</strong> (" + members.length + ")" +
+      "<ul>" + members.map((s) =>
+        "<li><code>" + esc(s.name) + "</code> <span class=\"kind\">" + esc(s.kind) + "</span> " +
+        '<span class="mono">' + esc(s.path) + ":" + esc(s.start_line) + "</span></li>",
+      ).join("") + "</ul>";
+    list.appendChild(div);
+  }
+  if (data.truncated) {
+    const more = document.createElement("p");
+    more.className = "sync";
+    more.textContent = "Showing first 50 groups.";
+    list.appendChild(more);
+  }
+  el.appendChild(list);
+}
+
+function renderDead(el, summary, body, label, data) {
+  const symbols = Array.isArray(data.symbols) ? data.symbols : [];
+  summary.textContent = label + " (" + symbols.length + (data.truncated ? "+" : "") + ")";
+  if (symbols.length === 0) {
+    body.textContent = "No dead code found among unexported symbols.";
+    return;
+  }
+  body.remove();
+  const list = document.createElement("ul");
+  list.className = "health-list";
+  for (const s of symbols) {
+    const li = document.createElement("li");
+    li.innerHTML = "<code>" + esc(s.name) + "</code> <span class=\"kind\">" + esc(s.kind) + "</span> " +
+      '<span class="mono">' + esc(s.path) + ":" + esc(s.start_line) + "</span>";
+    list.appendChild(li);
+  }
+  el.appendChild(list);
+  if (data.truncated) {
+    const more = document.createElement("p");
+    more.className = "sync";
+    more.textContent = "Showing first 50 symbols.";
+    el.appendChild(more);
+  }
 }
 
 function num(v, k) {

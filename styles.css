@@ -144,3 +144,19 @@ h2.srv {
   font-size: 12px;
   color: var(--warn);
 }
+.kind {
+  display: inline-block;
+  font-size: 11px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 6px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.mono, code { font-family: var(--mono); font-size: 12.5px; }
+details.health { margin-top: 8px; font-size: 13px; }
+details.health > summary { cursor: pointer; color: var(--muted); }
+details.health ul { margin: 6px 0; padding-left: 20px; }
+details.health li { margin: 2px 0; }
+.dupgroup { margin: 8px 0 4px; }
+.health-list { list-style: disc; }
