@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Astra — Argus Dashboard</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <h1>Astra <span>argus dashboard</span></h1>
+  <div class="spacer"></div>
+  <label for="url">Argus URL</label>
+  <input type="text" id="url" size="30" placeholder="http://127.0.0.1:3000" autocomplete="off" spellcheck="false">
+  <label for="token">Token</label>
+  <input type="password" id="token" size="16" placeholder="bearer token" autocomplete="off">
+  <button class="primary" id="connect">Connect</button>
+</header>
+<main>
+  <p id="status">Enter your Argus server URL and token, then press Connect.</p>
+
+  <section id="dashboard" class="hidden">
+    <div class="hero">
+      <div class="hero-stat"><div class="v" id="projectCount">–</div><div class="k">projects connected</div></div>
+      <div class="hero-stat"><div class="v" id="totalSymbols">–</div><div class="k">symbols indexed</div></div>
+      <div class="hero-stat"><div class="v" id="totalFiles">–</div><div class="k">files indexed</div></div>
+      <div class="hero-meta">
+        <span id="serverLabel"></span>
+        <button id="refresh">Refresh</button>
+        <label class="auto"><input type="checkbox" id="auto" checked> auto-refresh 15s</label>
+      </div>
+    </div>
+    <div id="projects"></div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
